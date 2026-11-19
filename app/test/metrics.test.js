@@ -43,7 +43,7 @@ test('/metrics serves the Prometheus text format', async () => {
   assert.match(body, /http_request_duration_seconds_count\{method="GET",route="\/health"\} 2/);
   assert.match(body, /process_uptime_seconds \d+/);
   assert.match(body, /process_resident_memory_bytes \d+/);
-  assert.match(body, /app_info\{version="9\.9\.9"\} 1/);
+  assert.match(body, /app_info\{version="1\.0\.0"\} 1/);
 });
 
 test('errors are counted with their status and the route pattern, not the raw URL', async () => {
