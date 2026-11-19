@@ -1,0 +1,16 @@
+# Dependabot opens pull requests when dependencies have updates. Each PR runs the CI pipeline,
+# so an update is only merged once the tests and the Docker build pass.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /app
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,55 @@
+# Local run with monitoring:   docker compose up -d --build
+#   App:         http://localhost:3000        (metrics at /metrics)
+#   Prometheus:  http://localhost:9090
+# Stop:          docker compose down          (add -v to delete saved data)
+
+services:
+  app:
+    build: ./app
+    image: cloud-notes:local
+    container_name: cloud-notes-app
+    init: true
+    restart: unless-stopped
+    environment:
+      ADMIN_KEY: ${ADMIN_KEY:?Set ADMIN_KEY in the .env file (copy .env.example to .env)}
+    ports:
+      - "3000:3000"
+    volumes:
+      - notes-data:/data
+    networks:
+      - monitoring
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring
+
+networks:
+  monitoring:
+
+volumes:
+  notes-data:
+  prometheus-data:

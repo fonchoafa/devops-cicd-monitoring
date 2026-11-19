@@ -1,0 +1,189 @@
+# CI/CD pipeline:  GitHub -> Build -> Test -> Docker -> Deploy -> Monitor
+#
+#  push / pull request
+#        |
+#   [ test ]  ->  [ build ]  ->  [ publish ]  ->  [ deploy ]
+#   unit tests    Docker image    push image to    run the published image,
+#                 + health check  GHCR (main only) check /health and /metrics
+#
+# Pull requests run test + build only. Pushes to main also publish and deploy.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # lets you start the pipeline by hand from the Actions tab
+
+permissions:
+  contents: read # least privilege: jobs that need more ask for it themselves
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true # a newer push cancels the older run of the same branch
+
+jobs:
+  # ------------------------------------------------------------------ 1. test
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run automated tests
+        run: npm test
+
+  # ------------------------------------------------------------------ 2. build
+  build:
+    name: Build and check the Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          load: true # keep the image on the runner so the next step can run it
+          tags: cloud-notes:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start the container and wait until Docker reports it healthy
+        run: |
+          docker run -d --name cloud-notes -p 3000:3000 -e ADMIN_KEY=ci-only-key cloud-notes:ci
+          for i in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' cloud-notes)
+            echo "health: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 2
+          done
+          echo "The container did not become healthy"
+          docker logs cloud-notes
+          exit 1
+
+      - name: Smoke test the running container
+        run: |
+          curl -fsS http://localhost:3000/health
+          echo
+          curl -fsS -X POST http://localhost:3000/api/notes \
+            -H 'Content-Type: application/json' -d '{"title":"ci smoke test"}'
+          echo
+          curl -fsS http://localhost:3000/metrics | grep 'http_requests_total'
+          # The admin-only delete must refuse a request without the key
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+            http://localhost:3000/api/notes/00000000-0000-4000-8000-000000000000)" = "401"
+
+      - name: Show container logs
+        if: always()
+        run: docker logs cloud-notes
+
+  # ------------------------------------------------------------------ 3. publish
+  publish:
+    name: Publish image to GitHub Container Registry
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed to push to ghcr.io with the built-in token
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the image name (must be lowercase)
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # created automatically for every run
+
+      - name: Create tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  # ------------------------------------------------------------------ 4. deploy
+  deploy:
+    name: Deploy to staging and verify
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: staging # shows up under the repo's Environments, with its deployment history
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the published image and run it
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          docker pull "$IMAGE:latest"
+          docker run -d --name staging -p 3000:3000 -e ADMIN_KEY=staging-only-key "$IMAGE:latest"
+          for i in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' staging)
+            echo "health: $status"
+            if [ "$status" = "healthy" ]; then break; fi
+            sleep 2
+          done
+          test "$status" = "healthy" || { docker logs staging; exit 1; }
+          curl -fsS http://localhost:3000/health
+          echo
+          curl -fsS http://localhost:3000/metrics -o metrics.txt
+          head -5 metrics.txt
+
+      - name: Write a deployment summary
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          {
+            echo "### Deployed to staging"
+            echo ""
+            echo "- Image: \`$IMAGE:latest\`"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Health check: passed"
+            echo "- Metrics endpoint: reachable"
+          } >> "$GITHUB_STEP_SUMMARY"
