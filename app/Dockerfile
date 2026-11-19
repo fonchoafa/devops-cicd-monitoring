@@ -3,7 +3,7 @@
 # ---------- Stage 1: install production dependencies ----------
 # This stage is only used to build node_modules. Nothing from it except
 # node_modules ends up in the final image.
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 
 # Copy ONLY the dependency files first. Docker caches each step (layer), so as long as
@@ -13,7 +13,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ---------- Stage 2: the small runtime image ----------
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 WORKDIR /app
 
 # Defaults the app reads at start-up (override with -e or in docker-compose.yml).
